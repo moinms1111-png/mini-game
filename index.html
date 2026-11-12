@@ -21,6 +21,7 @@
   }
   #hud .big { font-size: 30px; font-weight: 800; letter-spacing: -.5px; }
   #hud .small { font-size: 14px; font-weight: 600; opacity: .85; margin-top: 2px; }
+  #hud .coin { color: #ffe27a; }
 
   #reset {
     position: fixed; top: 16px; right: 16px;
@@ -66,6 +67,7 @@
 <div id="hud">
   <div class="big" id="dist">0 m</div>
   <div class="small" id="best">Best: 0 m</div>
+  <div class="small coin" id="coins">🪙 0</div>
 </div>
 
 <button id="reset" title="Restart">↺</button>
@@ -115,8 +117,8 @@
   //  CONSTANTS
   // ============================================================
   const GRAVITY     = 2000;   // px / s^2
-  const ENGINE      = 1500;   // px / s^2  (rear = full, front = 45%)
-  const AIR_TORQUE  = 220;    // rotation control while airborne
+  const ENGINE      = 1500;   // px / s^2
+  const AIR_TORQUE  = 220;
   const WHEEL_R     = 16;
   const WHEEL_BASE  = 64;
   const MAX_SPEED   = 850;
@@ -128,13 +130,161 @@
   const keys = { gas: false, brake: false };
 
   const wheels = [
-    { x: 0, y: 0, px: 0, py: 0, r: WHEEL_R, onGround: false, spin: 0 }, // rear
-    { x: 0, y: 0, px: 0, py: 0, r: WHEEL_R, onGround: false, spin: 0 }  // front
+    { x: 0, y: 0, px: 0, py: 0, r: WHEEL_R, onGround: false, spin: 0 },
+    { x: 0, y: 0, px: 0, py: 0, r: WHEEL_R, onGround: false, spin: 0 }
   ];
 
   const cam = { x: 0, y: 0 };
   let startX = 220;
   let bestDist = 0;
+
+  // --- coins ---
+  const coins = [];
+  const coinParticles = [];
+  let coinCount = 0;
+  let nextCoinX = 500;
+
+  // ============================================================
+  //  COINS
+  // ============================================================
+  function spawnCoinsAhead() {
+    const limit = cam.x + W + 600;
+    while (nextCoinX < limit) {
+      // small cluster of 1-4 coins
+      const cluster = 1 + Math.floor(Math.random() * 4);
+      const baseX = nextCoinX;
+      for (let i = 0; i < cluster; i++) {
+        const x = baseX + i * 42;
+        const y = terrainY(x) - 50
+                - Math.sin(i * 0.9) * 10
+                - Math.random() * 10;
+        coins.push({
+          x,
+          baseY: y,
+          phase: Math.random() * Math.PI * 2,
+          collected: false,
+          pop: 0
+        });
+      }
+      nextCoinX = baseX + cluster * 42 + 120 + Math.random() * 220;
+    }
+  }
+
+  function updateCoins(dt) {
+    spawnCoinsAhead();
+
+    const midX = (wheels[0].x + wheels[1].x) / 2;
+    const midY = (wheels[0].y + wheels[1].y) / 2;
+    const pickupR = 46;
+
+    for (let i = coins.length - 1; i >= 0; i--) {
+      const c = coins[i];
+      c.phase += dt * 3;
+
+      if (!c.collected) {
+        const dx = c.x - midX;
+        const dy = c.baseY - midY;
+        if (dx * dx + dy * dy < pickupR * pickupR) {
+          c.collected = true;
+          coinCount++;
+          c.pop = 0.001;
+
+          // sparkle particles
+          for (let k = 0; k < 6; k++) {
+            coinParticles.push({
+              x: c.x,
+              y: c.baseY,
+              vx: (Math.random() - 0.5) * 220,
+              vy: -60 - Math.random() * 140,
+              life: 0.4 + Math.random() * 0.2,
+              maxLife: 0.6
+            });
+          }
+        }
+      } else {
+        c.pop += dt * 5;
+      }
+
+      // cull far behind or finished pop
+      if (c.x < cam.x - 300 || (c.collected && c.pop > 1)) {
+        coins.splice(i, 1);
+      }
+    }
+
+    // particles
+    for (let i = coinParticles.length - 1; i >= 0; i--) {
+      const p = coinParticles[i];
+      p.life -= dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vy += 520 * dt;
+      if (p.life <= 0) coinParticles.splice(i, 1);
+    }
+  }
+
+  function drawCoin(c) {
+    const bob = Math.sin(c.phase) * 4;
+    const y = c.baseY + bob;
+    const scale = c.collected ? 1 + c.pop * 2.2 : 1;
+    const alpha = c.collected ? Math.max(0, 1 - c.pop) : 1;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(c.x, y);
+    ctx.scale(scale, scale);
+
+    // shadow
+    ctx.beginPath();
+    ctx.ellipse(0, 14, 9, 4, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,.18)';
+    ctx.fill();
+
+    // coin body
+    const g = ctx.createRadialGradient(-3, -3, 2, 0, 0, 13);
+    g.addColorStop(0, '#fff6b0');
+    g.addColorStop(0.45, '#ffd93b');
+    g.addColorStop(1, '#e6a100');
+
+    ctx.beginPath();
+    ctx.arc(0, 0, 12, 0, Math.PI * 2);
+    ctx.fillStyle = g;
+    ctx.fill();
+
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#b87b00';
+    ctx.stroke();
+
+    // inner shine
+    ctx.beginPath();
+    ctx.arc(-3, -3, 4, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,.75)';
+    ctx.fill();
+
+    // inner ring
+    ctx.beginPath();
+    ctx.arc(0, 0, 7, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(184,123,0,.5)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawCoins() {
+    for (const c of coins) drawCoin(c);
+  }
+
+  function drawCoinParticles() {
+    for (const p of coinParticles) {
+      const a = Math.max(0, p.life / p.maxLife);
+      ctx.globalAlpha = a;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff3a8';
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
 
   // ============================================================
   //  RESET
@@ -154,6 +304,13 @@
 
     cam.x = startX - W * 0.35;
     cam.y = terrainY(startX) - H * 0.55;
+
+    // reset coins
+    coins.length = 0;
+    coinParticles.length = 0;
+    coinCount = 0;
+    nextCoinX = startX + 300;
+    spawnCoinsAhead();
   }
 
   // ============================================================
@@ -181,15 +338,13 @@
 
       if (pen <= 0) continue;
 
-      // --- positional correction (moves prev too -> no fake velocity) ---
       w.y  -= pen;
       w.py -= pen;
 
-      // --- surface frame ---
       const m = terrainSlope(w.x);
       const L = Math.hypot(1, m);
-      const nx =  m / L, ny = -1 / L;   // outward normal (points up)
-      const tx =  1 / L, ty =  m / L;   // tangent (points right)
+      const nx =  m / L, ny = -1 / L;
+      const tx =  1 / L, ty =  m / L;
 
       let vx = w.x - w.px;
       let vy = w.y - w.py;
@@ -197,13 +352,9 @@
       let vn = vx * nx + vy * ny;
       let vt = vx * tx + vy * ty;
 
-      // bounce (very small)
       if (vn < 0) vn = -vn * 0.05;
-
-      // rolling resistance
       vt *= 0.999;
 
-      // static friction keeps the car parked on hills when idle
       if (throttle === 0 && Math.abs(vt) < 40) {
         vt *= 0.80;
       }
@@ -219,7 +370,6 @@
   function physicsStep(dt) {
     const A = wheels[0], B = wheels[1];
 
-    // forward direction of the chassis
     let fx = B.x - A.x, fy = B.y - A.y;
     const fl = Math.hypot(fx, fy) || 1;
     fx /= fl; fy /= fl;
@@ -228,7 +378,6 @@
     const throttle = (keys.gas ? 1 : 0) - (keys.brake ? 1 : 0);
     const dt2 = dt * dt;
 
-    // ---- integrate ----
     for (let i = 0; i < 2; i++) {
       const w = wheels[i];
 
@@ -241,9 +390,8 @@
         ay += fy * ENGINE * throttle * drive;
       }
 
-      // air control: counter-rotating forces at the two wheels
       if (airborne && throttle !== 0) {
-        const px = -fy, py = fx;                 // perpendicular
+        const px = -fy, py = fx;
         const s = (i === 0 ? 1 : -1) * AIR_TORQUE * throttle;
         ax += px * s;
         ay += py * s;
@@ -252,7 +400,6 @@
       let vx = (w.x - w.px) * 0.99995;
       let vy = (w.y - w.py) * 0.99995;
 
-      // speed clamp
       const sp = Math.hypot(vx, vy);
       if (sp > MAX_SPEED / 180) {
         const k = (MAX_SPEED / 180) / sp;
@@ -265,13 +412,11 @@
       w.y += vy + ay * dt2;
     }
 
-    // ---- solve constraints ----
     for (let it = 0; it < 2; it++) {
       solveRigid();
       solveCollision();
     }
 
-    // ---- wheel spin (visual only) ----
     for (const w of wheels) {
       w.spin += (w.x - w.px) / w.r * 0.6;
     }
@@ -308,7 +453,6 @@
     const x0 = cam.x - 120;
     const x1 = cam.x + W + 120;
 
-    // body
     ctx.beginPath();
     ctx.moveTo(x0, terrainY(x0));
     for (let x = x0; x <= x1; x += 6) ctx.lineTo(x, terrainY(x));
@@ -323,7 +467,6 @@
     ctx.fillStyle = g;
     ctx.fill();
 
-    // grass highlight
     ctx.beginPath();
     ctx.moveTo(x0, terrainY(x0));
     for (let x = x0; x <= x1; x += 6) ctx.lineTo(x, terrainY(x));
@@ -371,7 +514,6 @@
     ctx.translate(mx, my);
     ctx.rotate(ang);
 
-    // body
     ctx.beginPath();
     ctx.moveTo(-46,   4);
     ctx.lineTo(-46, -12);
@@ -388,7 +530,6 @@
     ctx.strokeStyle = '#9b1b1b';
     ctx.stroke();
 
-    // window
     ctx.beginPath();
     ctx.moveTo(-13, -33);
     ctx.lineTo(  9, -33);
@@ -401,7 +542,6 @@
     ctx.strokeStyle = '#7fb8d6';
     ctx.stroke();
 
-    // headlight
     ctx.beginPath();
     ctx.arc(40, -5, 4, 0, Math.PI * 2);
     ctx.fillStyle = '#ffe27a';
@@ -416,7 +556,6 @@
   function render() {
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
 
-    // sky
     const sky = ctx.createLinearGradient(0, 0, 0, H);
     sky.addColorStop(0,    '#6fbfe8');
     sky.addColorStop(0.55, '#bfe8ff');
@@ -429,7 +568,9 @@
     ctx.save();
     ctx.translate(-cam.x, -cam.y);
     drawGround();
+    drawCoins();
     drawCar();
+    drawCoinParticles();
     ctx.restore();
   }
 
@@ -438,7 +579,7 @@
   // ============================================================
   const distEl = document.getElementById('dist');
   const bestEl = document.getElementById('best');
-  let distAccum = 0;
+  const coinsEl = document.getElementById('coins');
 
   function updateHUD() {
     const mid = (wheels[0].x + wheels[1].x) / 2;
@@ -448,6 +589,7 @@
 
     distEl.textContent = d.toFixed(0) + ' m';
     bestEl.textContent = 'Best: ' + bestDist.toFixed(0) + ' m';
+    coinsEl.textContent = '🪙 ' + coinCount;
   }
 
   // ============================================================
@@ -460,7 +602,7 @@
     const targetX = midX - W * 0.35;
     const targetY = midY - H * 0.55;
 
-    const k = 1 - Math.pow(0.001, dt);   // frame-rate independent smoothing
+    const k = 1 - Math.pow(0.001, dt);
     cam.x += (targetX - cam.x) * k;
     cam.y += (targetY - cam.y) * k;
   }
@@ -510,7 +652,7 @@
 
     let dt = (now - lastTime) / 1000;
     lastTime = now;
-    if (dt > 0.1) dt = 0.1;      // tab-switch guard
+    if (dt > 0.1) dt = 0.1;
 
     accumulator += dt;
 
@@ -520,6 +662,7 @@
       accumulator -= FIXED_DT;
     }
 
+    updateCoins(dt);
     updateCamera(dt);
     render();
     updateHUD();
