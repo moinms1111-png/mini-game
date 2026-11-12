@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Hill Climb Race</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: #7ec8f0;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none; user-select: none;
+  }
+  #game { display: block; touch-action: none; }
+
+  #hud {
+    position: fixed; top: 16px; left: 18px;
+    color: #fff; pointer-events: none;
+    text-shadow: 0 2px 8px rgba(0,0,0,.45);
+  }
+  #hud .big { font-size: 30px; font-weight: 800; letter-spacing: -.5px; }
+  #hud .small { font-size: 14px; font-weight: 600; opacity: .85; margin-top: 2px; }
+
+  #reset {
+    position: fixed; top: 16px; right: 16px;
+    width: 48px; height: 48px; border-radius: 50%;
+    border: 3px solid rgba(255,255,255,.55);
+    background: rgba(255,255,255,.22);
+    color: #fff; font-size: 22px; cursor: pointer;
+    -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+    transition: background .15s;
+  }
+  #reset:hover { background: rgba(255,255,255,.4); }
+  #reset:active { transform: scale(.94); }
+
+  #controls {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    display: flex; justify-content: space-between;
+    padding: 20px 24px 28px;
+    pointer-events: none;
+  }
+  .btn {
+    pointer-events: auto;
+    width: 108px; height: 108px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 36px; color: #fff;
+    background: rgba(255,255,255,.20);
+    border: 3px solid rgba(255,255,255,.5);
+    -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+    transition: background .1s, transform .1s;
+    cursor: pointer;
+  }
+  .btn:active { background: rgba(255,255,255,.45); transform: scale(.95); }
+
+  @media (max-width: 600px) {
+    .btn { width: 88px; height: 88px; font-size: 30px; }
+    #hud .big { font-size: 24px; }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="game"></canvas>
+
+<div id="hud">
+  <div class="big" id="dist">0 m</div>
+  <div class="small" id="best">Best: 0 m</div>
+</div>
+
+<button id="reset" title="Restart">↺</button>
+
+<div id="controls">
+  <div class="btn" id="brakeBtn">◀</div>
+  <div class="btn" id="gasBtn">▶</div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ============================================================
+  //  CANVAS
+  // ============================================================
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, DPR = 1;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width  = Math.round(W * DPR);
+    canvas.height = Math.round(H * DPR);
+    canvas.style.width  = W + 'px';
+    canvas.style.height = H + 'px';
+  }
+  window.addEventListener('resize', resize);
+
+  // ============================================================
+  //  TERRAIN  (procedural, infinite)
+  // ============================================================
+  function terrainY(x) {
+    return 340
+      + 75 * Math.sin(x * 0.0013)
+      + 42 * Math.sin(x * 0.0037 + 1.7)
+      + 17 * Math.sin(x * 0.0111 + 0.4)
+      + 7  * Math.sin(x * 0.0293 + 2.2);
+  }
+  function terrainSlope(x) {
+    return (terrainY(x + 1) - terrainY(x - 1)) * 0.5;
+  }
+
+  // ============================================================
+  //  CONSTANTS
+  // ============================================================
+  const GRAVITY     = 2000;   // px / s^2
+  const ENGINE      = 1500;   // px / s^2  (rear = full, front = 45%)
+  const AIR_TORQUE  = 220;    // rotation control while airborne
+  const WHEEL_R     = 16;
+  const WHEEL_BASE  = 64;
+  const MAX_SPEED   = 850;
+  const FIXED_DT    = 1 / 180;
+
+  // ============================================================
+  //  STATE
+  // ============================================================
+  const keys = { gas: false, brake: false };
+
+  const wheels = [
+    { x: 0, y: 0, px: 0, py: 0, r: WHEEL_R, onGround: false, spin: 0 }, // rear
+    { x: 0, y: 0, px: 0, py: 0, r: WHEEL_R, onGround: false, spin: 0 }  // front
+  ];
+
+  const cam = { x: 0, y: 0 };
+  let startX = 220;
+  let bestDist = 0;
+
+  // ============================================================
+  //  RESET
+  // ============================================================
+  function reset() {
+    startX = 220;
+    wheels[0].x = startX - WHEEL_BASE / 2;
+    wheels[1].x = startX + WHEEL_BASE / 2;
+
+    for (const w of wheels) {
+      w.y  = terrainY(w.x) - 50;
+      w.px = w.x;
+      w.py = w.y;
+      w.onGround = false;
+      w.spin = 0;
+    }
+
+    cam.x = startX - W * 0.35;
+    cam.y = terrainY(startX) - H * 0.55;
+  }
+
+  // ============================================================
+  //  PHYSICS
+  // ============================================================
+  function solveRigid() {
+    const a = wheels[0], b = wheels[1];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const d = Math.hypot(dx, dy);
+    if (d < 1e-6) return;
+
+    const diff = ((d - WHEEL_BASE) / d) * 0.5;
+    a.x += dx * diff;  a.y += dy * diff;
+    b.x -= dx * diff;  b.y -= dy * diff;
+  }
+
+  function solveCollision() {
+    const throttle = (keys.gas ? 1 : 0) - (keys.brake ? 1 : 0);
+
+    for (const w of wheels) {
+      const gy  = terrainY(w.x);
+      const pen = (w.y + w.r) - gy;
+
+      w.onGround = pen > -1.5;
+
+      if (pen <= 0) continue;
+
+      // --- positional correction (moves prev too -> no fake velocity) ---
+      w.y  -= pen;
+      w.py -= pen;
+
+      // --- surface frame ---
+      const m = terrainSlope(w.x);
+      const L = Math.hypot(1, m);
+      const nx =  m / L, ny = -1 / L;   // outward normal (points up)
+      const tx =  1 / L, ty =  m / L;   // tangent (points right)
+
+      let vx = w.x - w.px;
+      let vy = w.y - w.py;
+
+      let vn = vx * nx + vy * ny;
+      let vt = vx * tx + vy * ty;
+
+      // bounce (very small)
+      if (vn < 0) vn = -vn * 0.05;
+
+      // rolling resistance
+      vt *= 0.999;
+
+      // static friction keeps the car parked on hills when idle
+      if (throttle === 0 && Math.abs(vt) < 40) {
+        vt *= 0.80;
+      }
+
+      vx = nx * vn + tx * vt;
+      vy = ny * vn + ty * vt;
+
+      w.px = w.x - vx;
+      w.py = w.y - vy;
+    }
+  }
+
+  function physicsStep(dt) {
+    const A = wheels[0], B = wheels[1];
+
+    // forward direction of the chassis
+    let fx = B.x - A.x, fy = B.y - A.y;
+    const fl = Math.hypot(fx, fy) || 1;
+    fx /= fl; fy /= fl;
+
+    const airborne = !A.onGround && !B.onGround;
+    const throttle = (keys.gas ? 1 : 0) - (keys.brake ? 1 : 0);
+    const dt2 = dt * dt;
+
+    // ---- integrate ----
+    for (let i = 0; i < 2; i++) {
+      const w = wheels[i];
+
+      let ax = 0;
+      let ay = GRAVITY;
+
+      if (throttle !== 0) {
+        const drive = (i === 0) ? 1.0 : 0.45;
+        ax += fx * ENGINE * throttle * drive;
+        ay += fy * ENGINE * throttle * drive;
+      }
+
+      // air control: counter-rotating forces at the two wheels
+      if (airborne && throttle !== 0) {
+        const px = -fy, py = fx;                 // perpendicular
+        const s = (i === 0 ? 1 : -1) * AIR_TORQUE * throttle;
+        ax += px * s;
+        ay += py * s;
+      }
+
+      let vx = (w.x - w.px) * 0.99995;
+      let vy = (w.y - w.py) * 0.99995;
+
+      // speed clamp
+      const sp = Math.hypot(vx, vy);
+      if (sp > MAX_SPEED / 180) {
+        const k = (MAX_SPEED / 180) / sp;
+        vx *= k; vy *= k;
+      }
+
+      w.px = w.x;
+      w.py = w.y;
+      w.x += vx + ax * dt2;
+      w.y += vy + ay * dt2;
+    }
+
+    // ---- solve constraints ----
+    for (let it = 0; it < 2; it++) {
+      solveRigid();
+      solveCollision();
+    }
+
+    // ---- wheel spin (visual only) ----
+    for (const w of wheels) {
+      w.spin += (w.x - w.px) / w.r * 0.6;
+    }
+  }
+
+  // ============================================================
+  //  RENDERING
+  // ============================================================
+  function drawHills() {
+    const layers = [
+      { p: 0.22, amp: 70, freq: 0.0011, base: 0.58, color: '#a9d9bd' },
+      { p: 0.42, amp: 55, freq: 0.0020, base: 0.68, color: '#83bf9b' }
+    ];
+
+    for (const l of layers) {
+      ctx.beginPath();
+      ctx.moveTo(0, H);
+      for (let x = 0; x <= W; x += 16) {
+        const wx = x + cam.x * l.p;
+        const y = H * l.base
+                + Math.sin(wx * l.freq) * l.amp
+                + Math.sin(wx * l.freq * 2.7 + 1.3) * l.amp * 0.4
+                - cam.y * 0.12;
+        ctx.lineTo(x, y);
+      }
+      ctx.lineTo(W, H);
+      ctx.closePath();
+      ctx.fillStyle = l.color;
+      ctx.fill();
+    }
+  }
+
+  function drawGround() {
+    const x0 = cam.x - 120;
+    const x1 = cam.x + W + 120;
+
+    // body
+    ctx.beginPath();
+    ctx.moveTo(x0, terrainY(x0));
+    for (let x = x0; x <= x1; x += 6) ctx.lineTo(x, terrainY(x));
+    ctx.lineTo(x1, cam.y + H + 1200);
+    ctx.lineTo(x0, cam.y + H + 1200);
+    ctx.closePath();
+
+    const g = ctx.createLinearGradient(0, cam.y, 0, cam.y + H);
+    g.addColorStop(0, '#6ab04c');
+    g.addColorStop(0.25, '#4e8f36');
+    g.addColorStop(1, '#2f5a22');
+    ctx.fillStyle = g;
+    ctx.fill();
+
+    // grass highlight
+    ctx.beginPath();
+    ctx.moveTo(x0, terrainY(x0));
+    for (let x = x0; x <= x1; x += 6) ctx.lineTo(x, terrainY(x));
+    ctx.strokeStyle = '#8ed36a';
+    ctx.lineWidth = 5;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  }
+
+  function drawWheel(w) {
+    ctx.save();
+    ctx.translate(w.x, w.y);
+    ctx.rotate(w.spin);
+
+    ctx.beginPath();
+    ctx.arc(0, 0, w.r, 0, Math.PI * 2);
+    ctx.fillStyle = '#1d1d1f';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(0, 0, w.r * 0.52, 0, Math.PI * 2);
+    ctx.fillStyle = '#c9ccd1';
+    ctx.fill();
+
+    ctx.strokeStyle = '#8b9096';
+    ctx.lineWidth = 2.5;
+    for (let i = 0; i < 4; i++) {
+      const a = i * Math.PI / 2;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(Math.cos(a) * w.r * 0.78, Math.sin(a) * w.r * 0.78);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  function drawCar() {
+    const a = wheels[0], b = wheels[1];
+    const ang = Math.atan2(b.y - a.y, b.x - a.x);
+    const mx = (a.x + b.x) / 2;
+    const my = (a.y + b.y) / 2;
+
+    ctx.save();
+    ctx.translate(mx, my);
+    ctx.rotate(ang);
+
+    // body
+    ctx.beginPath();
+    ctx.moveTo(-46,   4);
+    ctx.lineTo(-46, -12);
+    ctx.lineTo(-30, -16);
+    ctx.lineTo(-18, -38);
+    ctx.lineTo( 14, -38);
+    ctx.lineTo( 28, -16);
+    ctx.lineTo( 46, -12);
+    ctx.lineTo( 46,   4);
+    ctx.closePath();
+    ctx.fillStyle = '#d62828';
+    ctx.fill();
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = '#9b1b1b';
+    ctx.stroke();
+
+    // window
+    ctx.beginPath();
+    ctx.moveTo(-13, -33);
+    ctx.lineTo(  9, -33);
+    ctx.lineTo( 17, -18);
+    ctx.lineTo( -6, -18);
+    ctx.closePath();
+    ctx.fillStyle = '#bfe9ff';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#7fb8d6';
+    ctx.stroke();
+
+    // headlight
+    ctx.beginPath();
+    ctx.arc(40, -5, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffe27a';
+    ctx.fill();
+
+    ctx.restore();
+
+    drawWheel(a);
+    drawWheel(b);
+  }
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // sky
+    const sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0,    '#6fbfe8');
+    sky.addColorStop(0.55, '#bfe8ff');
+    sky.addColorStop(1,    '#eaf8ff');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
+
+    drawHills();
+
+    ctx.save();
+    ctx.translate(-cam.x, -cam.y);
+    drawGround();
+    drawCar();
+    ctx.restore();
+  }
+
+  // ============================================================
+  //  HUD
+  // ============================================================
+  const distEl = document.getElementById('dist');
+  const bestEl = document.getElementById('best');
+  let distAccum = 0;
+
+  function updateHUD() {
+    const mid = (wheels[0].x + wheels[1].x) / 2;
+    const d = Math.max(0, (mid - startX) / 10);
+
+    if (d > bestDist) bestDist = d;
+
+    distEl.textContent = d.toFixed(0) + ' m';
+    bestEl.textContent = 'Best: ' + bestDist.toFixed(0) + ' m';
+  }
+
+  // ============================================================
+  //  CAMERA
+  // ============================================================
+  function updateCamera(dt) {
+    const midX = (wheels[0].x + wheels[1].x) / 2;
+    const midY = (wheels[0].y + wheels[1].y) / 2;
+
+    const targetX = midX - W * 0.35;
+    const targetY = midY - H * 0.55;
+
+    const k = 1 - Math.pow(0.001, dt);   // frame-rate independent smoothing
+    cam.x += (targetX - cam.x) * k;
+    cam.y += (targetY - cam.y) * k;
+  }
+
+  // ============================================================
+  //  INPUT
+  // ============================================================
+  function bindHold(el, key) {
+    const on  = e => { e.preventDefault(); keys[key] = true; };
+    const off = e => { e.preventDefault(); keys[key] = false; };
+
+    el.addEventListener('pointerdown', on);
+    el.addEventListener('pointerup', off);
+    el.addEventListener('pointerleave', off);
+    el.addEventListener('pointercancel', off);
+  }
+  bindHold(document.getElementById('gasBtn'),   'gas');
+  bindHold(document.getElementById('brakeBtn'), 'brake');
+
+  window.addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (k === 'arrowright' || k === 'arrowup' || k === 'd' || k === 'w') {
+      keys.gas = true; e.preventDefault();
+    }
+    if (k === 'arrowleft' || k === 'arrowdown' || k === 'a' || k === 's') {
+      keys.brake = true; e.preventDefault();
+    }
+    if (k === 'r') reset();
+  });
+
+  window.addEventListener('keyup', e => {
+    const k = e.key.toLowerCase();
+    if (k === 'arrowright' || k === 'arrowup' || k === 'd' || k === 'w') keys.gas = false;
+    if (k === 'arrowleft' || k === 'arrowdown' || k === 'a' || k === 's') keys.brake = false;
+  });
+
+  document.getElementById('reset').addEventListener('click', reset);
+
+  // ============================================================
+  //  MAIN LOOP
+  // ============================================================
+  let lastTime = performance.now();
+  let accumulator = 0;
+
+  function loop(now) {
+    requestAnimationFrame(loop);
+
+    let dt = (now - lastTime) / 1000;
+    lastTime = now;
+    if (dt > 0.1) dt = 0.1;      // tab-switch guard
+
+    accumulator += dt;
+
+    let guard = 0;
+    while (accumulator >= FIXED_DT && guard++ < 30) {
+      physicsStep(FIXED_DT);
+      accumulator -= FIXED_DT;
+    }
+
+    updateCamera(dt);
+    render();
+    updateHUD();
+  }
+
+  // ============================================================
+  //  BOOT
+  // ============================================================
+  resize();
+  reset();
+  requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
